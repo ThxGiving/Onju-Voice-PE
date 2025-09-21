@@ -82,8 +82,8 @@ substitutions:
   success_sound_url: "https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/jack_connected.flac"
   error_sound_url: "https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/jack_disconnected.flac"
   busy_sound_url: "https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_triple_press.flac"
-  attention_volume: "0.65"
-  pipeline_volume: "0.85"
+  attention_volume: "65%"
+  pipeline_volume: "85%"
   vad_silence_timeout: "1200ms"
   vad_end_timeout: "600ms"
   vad_max_duration: "15000ms"
@@ -285,11 +285,12 @@ media_player:
     id: cues_player
     internal: true
     name: "${friendly_name} cues"
-    speaker: cues_stream
-    num_channels: 2
-    format: FLAC
-    sample_rate: ${audio_sample_rate}
-    volume: ${attention_volume}
+    announcement_pipeline:
+      speaker: cues_stream
+      num_channels: 2
+      format: FLAC
+      sample_rate: ${audio_sample_rate}
+    volume_initial: ${attention_volume}
     on_play:
       - script.execute: ensure_amp_on
     on_announcement:
@@ -315,11 +316,17 @@ media_player:
     id: pipeline_player
     internal: true
     name: "${friendly_name} assist"
-    speaker: pipeline_stream
-    num_channels: 2
-    format: WAV
-    sample_rate: ${audio_sample_rate}
-    volume: ${pipeline_volume}
+    announcement_pipeline:
+      speaker: pipeline_stream
+      num_channels: 2
+      format: WAV
+      sample_rate: ${audio_sample_rate}
+    media_pipeline:
+      speaker: pipeline_stream
+      num_channels: 2
+      format: WAV
+      sample_rate: ${audio_sample_rate}
+    volume_initial: ${pipeline_volume}
     on_play:
       - script.execute: ensure_amp_on
     on_pause:
