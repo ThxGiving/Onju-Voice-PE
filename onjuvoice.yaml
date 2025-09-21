@@ -64,8 +64,8 @@ substitutions:
   audio_sample_rate: "48000"
   microphone_gain: "4"
   led_enabled: "true"
-  led_pixel_count: "12"
-  led_last_index: "11"
+  led_pixel_count: "6"
+  led_last_index: "5"
   led_data_pin: GPIO11
   ws2812_variant: SK6812
   led_idle_brightness: "35%"
