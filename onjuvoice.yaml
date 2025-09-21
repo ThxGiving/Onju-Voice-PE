@@ -65,6 +65,7 @@ substitutions:
   microphone_gain: "4"
   led_enabled: "true"
   led_pixel_count: "12"
+  led_last_index: "11"
   led_data_pin: GPIO11
   ws2812_variant: SK6812
   led_idle_brightness: "35%"
@@ -82,8 +83,8 @@ substitutions:
   success_sound_url: "https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/jack_connected.flac"
   error_sound_url: "https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/jack_disconnected.flac"
   busy_sound_url: "https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_triple_press.flac"
-  attention_volume: "0.65"
-  pipeline_volume: "0.85"
+  attention_volume: "65%"
+  pipeline_volume: "85%"
   vad_silence_timeout: "1200ms"
   vad_end_timeout: "600ms"
   vad_max_duration: "15000ms"
@@ -181,7 +182,7 @@ improv_serial:
 
 logger:
   level: INFO
-  baud_rate: 0
+  baud_rate: 115200
 
 api:
   encryption:
@@ -255,17 +256,23 @@ speaker:
     id: speaker_mixer
     output_speaker: speaker_hw
     source_speakers:
-      - id: cues_stream
+      - id: cues_stream_input
         timeout: 1500ms
-      - id: pipeline_stream
+      - id: pipeline_announcement_input
+        timeout: 4000ms
+      - id: pipeline_media_input
         timeout: 4000ms
   - platform: resampler
     id: cues_stream
-    output_speaker: speaker_mixer
+    output_speaker: cues_stream_input
     sample_rate: ${audio_sample_rate}
   - platform: resampler
-    id: pipeline_stream
-    output_speaker: speaker_mixer
+    id: pipeline_announcement_stream
+    output_speaker: pipeline_announcement_input
+    sample_rate: ${audio_sample_rate}
+  - platform: resampler
+    id: pipeline_media_stream
+    output_speaker: pipeline_media_input
     sample_rate: ${audio_sample_rate}
 
 microphone:
@@ -274,8 +281,8 @@ microphone:
     i2s_audio_id: i2s_in
     i2s_din_pin: ${i2s_din_pin}
     use_apll: true
-    channel: left
-    sample_rate: ${audio_sample_rate}
+    channel: stereo
+    sample_rate: 16000
     bits_per_sample: 32bit
     pdm: false
     adc_type: external
@@ -285,11 +292,12 @@ media_player:
     id: cues_player
     internal: true
     name: "${friendly_name} cues"
-    speaker: cues_stream
-    num_channels: 2
-    format: FLAC
-    sample_rate: ${audio_sample_rate}
-    volume: ${attention_volume}
+    announcement_pipeline:
+      speaker: cues_stream
+      num_channels: 2
+      format: FLAC
+      sample_rate: ${audio_sample_rate}
+    volume_initial: ${attention_volume}
     on_play:
       - script.execute: ensure_amp_on
     on_announcement:
@@ -315,11 +323,17 @@ media_player:
     id: pipeline_player
     internal: true
     name: "${friendly_name} assist"
-    speaker: pipeline_stream
-    num_channels: 2
-    format: WAV
-    sample_rate: ${audio_sample_rate}
-    volume: ${pipeline_volume}
+    announcement_pipeline:
+      speaker: pipeline_announcement_stream
+      num_channels: 2
+      format: WAV
+      sample_rate: ${audio_sample_rate}
+    media_pipeline:
+      speaker: pipeline_media_stream
+      num_channels: 2
+      format: WAV
+      sample_rate: ${audio_sample_rate}
+    volume_initial: ${pipeline_volume}
     on_play:
       - script.execute: ensure_amp_on
     on_pause:
@@ -337,10 +351,8 @@ micro_wake_word:
   models:
     - id: primary
       model: ${wake_word_model_url}
-      label: ${wake_word_name}
     - id: stop
       model: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
-      label: "stop"
       internal: true
   on_wake_word_detected:
     - if:
@@ -354,13 +366,10 @@ micro_wake_word:
               sound: "start"
           - voice_assistant.start:
               id: va
-              pipeline: ${assist_pipeline}
               wake_word: !lambda return wake_word;
 
 voice_assistant:
   id: va
-  pipeline: ${assist_pipeline}
-  language: ${assist_language}
   microphone:
     microphone: onju_mic
     channels: 1
@@ -368,13 +377,8 @@ voice_assistant:
   micro_wake_word: mww
   use_wake_word: false
   noise_suppression_level: 2
-  auto_gain: -4 dbfs
+  auto_gain: 0 dbfs
   volume_multiplier: 1.0
-  stt_vad:
-    mode: webrtc
-    silence_ms: ${vad_silence_timeout}
-    end_ms: ${vad_end_timeout}
-    max_ms: ${vad_max_duration}
   on_start:
     - lambda: id(conversation_active) = true;
     - micro_wake_word.stop
@@ -443,7 +447,6 @@ light:
               duration: 120ms
             - state: OFF
               duration: 80ms
-          num_pulses: 2
       - addressable_scan:
           name: listening_spinner
           move_interval: 60ms
@@ -455,7 +458,6 @@ light:
       - addressable_twinkle:
           name: speaking_wipe
           twinkle_probability: 35%
-          twinkle_speed: 4
       - strobe:
           name: error_flash
           colors:
@@ -471,19 +473,17 @@ light:
               green: 0%
               blue: 0%
               duration: 180ms
-          num_pulses: 6
   - platform: partition
     id: ring_light
     segments:
       - id: ring_pixels
         from: 0
-        to: -1
+        to: ${led_last_index}
     default_transition_length: 0s
 
 output:
   - platform: gpio
     id: mute_led
-    internal: true
     pin:
       number: ${mute_led_pin}
       inverted: false
@@ -830,81 +830,72 @@ script:
   - id: update_leds
     mode: queued
     then:
-      - if:
-          condition:
-            lambda: return id(led_enabled_runtime);
-          then:
-            - choose:
-                - condition:
-                    lambda: return id(mic_muted);
-                  sequence:
-                    - light.turn_on:
-                        id: ring_light
-                        effect: !lambda return id(muted_led_animation_select).state;
-                        brightness: 35%
-                        red: 100%
-                        green: 10%
-                        blue: 10%
-                - condition:
-                    lambda: return id(assistant_state) == ${state_error};
-                  sequence:
-                    - light.turn_on:
-                        id: ring_light
-                        effect: !lambda return id(error_led_animation_select).state;
-                        brightness: 100%
-                        red: 100%
-                        green: 0%
-                        blue: 0%
-                - condition:
-                    lambda: return id(dnd_active);
-                  sequence:
-                    - light.turn_on:
-                        id: ring_light
-                        effect: !lambda return id(dnd_led_animation_select).state;
-                        brightness: 20%
-                        red: 50%
-                        green: 0%
-                        blue: 80%
-                - condition:
-                    lambda: return id(assistant_state) == ${state_listening};
-                  sequence:
-                    - light.turn_on:
-                        id: ring_light
-                        effect: !lambda return id(listening_led_animation_select).state;
-                        brightness: ${led_listening_brightness}
-                        red: 5%
-                        green: 90%
-                        blue: 80%
-                - condition:
-                    lambda: return id(assistant_state) == ${state_processing};
-                  sequence:
-                    - light.turn_on:
-                        id: ring_light
-                        effect: !lambda return id(processing_led_animation_select).state;
-                        brightness: ${led_processing_brightness}
-                        red: 100%
-                        green: 50%
-                        blue: 0%
-                - condition:
-                    lambda: return id(assistant_state) == ${state_speaking};
-                  sequence:
-                    - light.turn_on:
-                        id: ring_light
-                        effect: !lambda return id(speaking_led_animation_select).state;
-                        brightness: ${led_speaking_brightness}
-                        red: 80%
-                        green: 60%
-                        blue: 20%
-                - default:
-                    - light.turn_on:
-                        id: ring_light
-                        effect: !lambda return id(idle_led_animation_select).state;
-                        brightness: ${led_idle_brightness}
-                        red: 0%
-                        green: 30%
-                        blue: 80%
-          else:
-            - light.turn_off: ring_light
+      - lambda: |-
+          if (!id(led_enabled_runtime)) {
+            id(ring_light).turn_off();
+            return;
+          }
+
+          auto parse_pct = [](const char *value) -> float {
+            std::string str(value);
+            auto pos = str.find('%');
+            if (pos != std::string::npos) {
+              str = str.substr(0, pos);
+            }
+            return atof(str.c_str()) / 100.0f;
+          };
+
+          float brightness = parse_pct("${led_idle_brightness}");
+          float red = 0.0f;
+          float green = 0.3f;
+          float blue = 0.8f;
+          std::string effect = id(idle_led_animation_select).state;
+
+          if (id(mic_muted)) {
+            brightness = 0.35f;
+            red = 1.0f;
+            green = 0.10f;
+            blue = 0.10f;
+            effect = id(muted_led_animation_select).state;
+          } else if (id(assistant_state) == ${state_error}) {
+            brightness = 1.0f;
+            red = 1.0f;
+            green = 0.0f;
+            blue = 0.0f;
+            effect = id(error_led_animation_select).state;
+          } else if (id(dnd_active)) {
+            brightness = 0.20f;
+            red = 0.50f;
+            green = 0.0f;
+            blue = 0.80f;
+            effect = id(dnd_led_animation_select).state;
+          } else if (id(assistant_state) == ${state_listening}) {
+            brightness = parse_pct("${led_listening_brightness}");
+            red = 0.05f;
+            green = 0.90f;
+            blue = 0.80f;
+            effect = id(listening_led_animation_select).state;
+          } else if (id(assistant_state) == ${state_processing}) {
+            brightness = parse_pct("${led_processing_brightness}");
+            red = 1.0f;
+            green = 0.50f;
+            blue = 0.0f;
+            effect = id(processing_led_animation_select).state;
+          } else if (id(assistant_state) == ${state_speaking}) {
+            brightness = parse_pct("${led_speaking_brightness}");
+            red = 0.80f;
+            green = 0.60f;
+            blue = 0.20f;
+            effect = id(speaking_led_animation_select).state;
+          }
+
+          auto call = id(ring_light).turn_on();
+          call.set_brightness(brightness);
+          call.set_red(red);
+          call.set_green(green);
+          call.set_blue(blue);
+          call.set_effect(effect.c_str());
+          call.perform();
   - id: prepare_session
     mode: restart
     parameters:
@@ -933,15 +924,17 @@ script:
                 red: 100%
                 green: 60%
                 blue: 0%
-      - choose:
-          - condition:
-              lambda: return sound == "follow";
-            sequence:
-              - script.execute: play_follow_up_sound
-          - condition:
-              lambda: return sound == "start";
-            sequence:
-              - script.execute: play_start_sound
+      - if:
+          condition:
+            lambda: return sound == "follow";
+          then:
+            - script.execute: play_follow_up_sound
+          else:
+            - if:
+                condition:
+                  lambda: return sound == "start";
+                then:
+                  - script.execute: play_start_sound
       - delay: ${wake_word_start_delay}
       - lambda: id(assistant_state) = ${state_listening};
       - script.execute: update_leds
@@ -954,33 +947,31 @@ script:
       - if:
           condition:
             lambda: return id(mic_muted) || id(dnd_active);
-        then:
-          - script.execute: play_busy_sound
-        else:
-          - script.execute:
-              id: prepare_session
-              sound: !lambda return sound;
-          - voice_assistant.start:
-              id: va
-              pipeline: ${assist_pipeline}
+          then:
+            - script.execute: play_busy_sound
+          else:
+            - script.execute:
+                id: prepare_session
+                sound: !lambda return sound;
+            - voice_assistant.start:
+                id: va
   - id: open_follow_up_session
     mode: restart
     then:
       - if:
           condition:
             lambda: return id(mic_muted) || id(dnd_active);
-        then:
-          - lambda: id(pending_follow_up) = false;
-          - script.execute: rearm_hotword
-        else:
-          - lambda: id(pending_follow_up) = false;
-          - script.execute:
-              id: prepare_session
-              sound: "follow"
-          - voice_assistant.start:
-              id: va
-              pipeline: ${assist_pipeline}
-          - script.execute: follow_up_guard
+          then:
+            - lambda: id(pending_follow_up) = false;
+            - script.execute: rearm_hotword
+          else:
+            - lambda: id(pending_follow_up) = false;
+            - script.execute:
+                id: prepare_session
+                sound: "follow"
+            - voice_assistant.start:
+                id: va
+            - script.execute: follow_up_guard
   - id: follow_up_guard
     mode: restart
     then:
@@ -990,76 +981,76 @@ script:
             not:
               voice_assistant.is_running:
                 id: va
-        then:
-          - lambda: |-
-              id(follow_up_open) = false;
-              if (!id(conversation_active)) {
-                id(assistant_state) = id(mic_muted) ? ${state_muted} : ${state_idle};
-              }
-          - script.execute: update_leds
-          - script.execute: rearm_hotword
-          - script.execute: maybe_power_down_amp
+          then:
+            - lambda: |-
+                id(follow_up_open) = false;
+                if (!id(conversation_active)) {
+                  id(assistant_state) = id(mic_muted) ? ${state_muted} : ${state_idle};
+                }
+            - script.execute: update_leds
+            - script.execute: rearm_hotword
+            - script.execute: maybe_power_down_amp
   - id: play_start_sound
     mode: restart
     then:
       - if:
           condition:
             switch.is_on: attention_sounds_switch
-        then:
-          - script.execute: ensure_amp_on
-          - media_player.speaker.play_on_device_media_file:
-              id: cues_player
-              media_file: start_listen
-              announcement: true
+          then:
+            - script.execute: ensure_amp_on
+            - media_player.speaker.play_on_device_media_file:
+                id: cues_player
+                media_file: start_listen
+                announcement: true
   - id: play_follow_up_sound
     mode: restart
     then:
       - if:
           condition:
             switch.is_on: attention_sounds_switch
-        then:
-          - script.execute: ensure_amp_on
-          - media_player.speaker.play_on_device_media_file:
-              id: cues_player
-              media_file: follow_up
-              announcement: true
+          then:
+            - script.execute: ensure_amp_on
+            - media_player.speaker.play_on_device_media_file:
+                id: cues_player
+                media_file: follow_up
+                announcement: true
   - id: play_end_sound
     mode: restart
     then:
       - if:
           condition:
             switch.is_on: attention_sounds_switch
-        then:
-          - script.execute: ensure_amp_on
-          - media_player.speaker.play_on_device_media_file:
-              id: cues_player
-              media_file: end_listen
-              announcement: true
+          then:
+            - script.execute: ensure_amp_on
+            - media_player.speaker.play_on_device_media_file:
+                id: cues_player
+                media_file: end_listen
+                announcement: true
   - id: play_thinking_sound
     mode: restart
     then:
       - if:
           condition:
             switch.is_on: attention_sounds_switch
-        then:
-          - delay: 120ms
-          - script.execute: ensure_amp_on
-          - media_player.speaker.play_on_device_media_file:
-              id: cues_player
-              media_file: thinking
-              announcement: true
+          then:
+            - delay: 120ms
+            - script.execute: ensure_amp_on
+            - media_player.speaker.play_on_device_media_file:
+                id: cues_player
+                media_file: thinking
+                announcement: true
   - id: play_success_sound
     mode: restart
     then:
       - if:
           condition:
             switch.is_on: attention_sounds_switch
-        then:
-          - script.execute: ensure_amp_on
-          - media_player.speaker.play_on_device_media_file:
-              id: cues_player
-              media_file: success
-              announcement: true
+          then:
+            - script.execute: ensure_amp_on
+            - media_player.speaker.play_on_device_media_file:
+                id: cues_player
+                media_file: success
+                announcement: true
   - id: play_error_sound
     mode: restart
     then:
@@ -1074,48 +1065,60 @@ script:
       - if:
           condition:
             switch.is_on: attention_sounds_switch
-        then:
-          - script.execute: ensure_amp_on
-          - media_player.speaker.play_on_device_media_file:
-              id: cues_player
-              media_file: busy
-              announcement: true
+          then:
+            - script.execute: ensure_amp_on
+            - media_player.speaker.play_on_device_media_file:
+                id: cues_player
+                media_file: busy
+                announcement: true
   - id: play_sound_router
     mode: restart
     parameters:
       sound: string
     then:
-      - choose:
-          - condition:
-              lambda: return sound == "start";
-            sequence:
-              - script.execute: play_start_sound
-          - condition:
-              lambda: return sound == "follow";
-            sequence:
-              - script.execute: play_follow_up_sound
-          - condition:
-              lambda: return sound == "end";
-            sequence:
-              - script.execute: play_end_sound
-          - condition:
-              lambda: return sound == "thinking";
-            sequence:
-              - script.execute: play_thinking_sound
-          - condition:
-              lambda: return sound == "success";
-            sequence:
-              - script.execute: play_success_sound
-          - condition:
-              lambda: return sound == "error";
-            sequence:
-              - script.execute: play_error_sound
-          - condition:
-              lambda: return sound == "busy";
-            sequence:
-              - script.execute: play_busy_sound
-          - default:
-              - lambda: ESP_LOGW("feedback", "Unknown feedback sound '%s'", sound.c_str());
+      - if:
+          condition:
+            lambda: return sound == "start";
+          then:
+            - script.execute: play_start_sound
+          else:
+            - if:
+                condition:
+                  lambda: return sound == "follow";
+                then:
+                  - script.execute: play_follow_up_sound
+                else:
+                  - if:
+                      condition:
+                        lambda: return sound == "end";
+                      then:
+                        - script.execute: play_end_sound
+                      else:
+                        - if:
+                            condition:
+                              lambda: return sound == "thinking";
+                            then:
+                              - script.execute: play_thinking_sound
+                            else:
+                              - if:
+                                  condition:
+                                    lambda: return sound == "success";
+                                  then:
+                                    - script.execute: play_success_sound
+                                  else:
+                                    - if:
+                                        condition:
+                                          lambda: return sound == "error";
+                                        then:
+                                          - script.execute: play_error_sound
+                                        else:
+                                          - if:
+                                              condition:
+                                                lambda: return sound == "busy";
+                                              then:
+                                                - script.execute: play_busy_sound
+                                              else:
+                                                - lambda: ESP_LOGW("feedback", "Unknown feedback sound '%s'", sound.c_str());
   - id: stop_active_audio
     mode: restart
     then:
@@ -1125,15 +1128,13 @@ script:
           condition:
             voice_assistant.is_running:
               id: va
-        then:
-          - voice_assistant.stop:
-              id: va
-          - wait_until:
-              timeout: 750ms
-              condition:
-                not:
-                  voice_assistant.is_running:
-                    id: va
+          then:
+            - voice_assistant.stop:
+                id: va
+            - wait_until:
+                timeout: 750ms
+                condition:
+                  lambda: return !id(va).is_running();
       - lambda: |-
           id(conversation_active) = false;
           id(conversation_had_tts) = false;
@@ -1146,14 +1147,14 @@ script:
       - if:
           condition:
             switch.is_off: speaker_amp
-        then:
-          - switch.turn_on: speaker_amp
-          - delay: 30ms
+          then:
+            - switch.turn_on: speaker_amp
+            - delay: 30ms
       - if:
           condition:
             switch.is_on: speaker_soft_mute
-        then:
-          - switch.turn_off: speaker_soft_mute
+          then:
+            - switch.turn_off: speaker_soft_mute
   - id: maybe_power_down_amp
     mode: restart
     then:
@@ -1172,17 +1173,17 @@ script:
               - not:
                   media_player.is_announcing:
                     id: cues_player
-        then:
+          then:
           - if:
               condition:
                 switch.is_off: speaker_soft_mute
-            then:
+              then:
               - switch.turn_on: speaker_soft_mute
           - delay: 50ms
           - if:
               condition:
                 switch.is_on: speaker_amp
-            then:
+              then:
               - switch.turn_off: speaker_amp
   - id: apply_mute_state
     mode: queued
@@ -1199,35 +1200,35 @@ script:
       - if:
           condition:
             lambda: return id(mic_muted);
-        then:
-          - script.execute: stop_active_audio
-          - microphone.mute: onju_mic
-          - lambda: id(assistant_state) = ${state_muted};
-          - script.execute: update_leds
-          - script.execute: rearm_hotword
-        else:
-          - microphone.unmute: onju_mic
-          - if:
-              condition:
-                lambda: return !id(conversation_active);
-            then:
-              - lambda: id(assistant_state) = ${state_idle};
-              - script.execute: update_leds
-          - script.execute: rearm_hotword
+          then:
+            - script.execute: stop_active_audio
+            - microphone.mute: onju_mic
+            - lambda: id(assistant_state) = ${state_muted};
+            - script.execute: update_leds
+            - script.execute: rearm_hotword
+          else:
+            - microphone.unmute: onju_mic
+            - if:
+                condition:
+                  lambda: return !id(conversation_active);
+                then:
+                  - lambda: id(assistant_state) = ${state_idle};
+                  - script.execute: update_leds
+      - script.execute: rearm_hotword
       - script.execute: update_mute_led
   - id: update_mute_led
     then:
       - if:
           condition:
             lambda: return ${mute_led_enabled};
-        then:
-          - if:
-              condition:
-                lambda: return id(mic_muted);
-            then:
-              - output.turn_on: mute_led
-            else:
-              - output.turn_off: mute_led
+          then:
+            - if:
+                condition:
+                  lambda: return id(mic_muted);
+                then:
+                  - output.turn_on: mute_led
+                else:
+                  - output.turn_off: mute_led
   - id: rearm_hotword
     mode: queued
     then:
@@ -1252,37 +1253,39 @@ script:
           bool should_follow = (id(follow_up_hint) || fallback_follow) && id(follow_up_switch).state && id(conversation_had_tts) && !id(mic_muted) && !id(dnd_active);
           id(pending_follow_up) = should_follow;
           id(follow_up_hint) = false;
-      - choose:
-          - condition:
-              lambda: return id(error_active);
-            sequence:
-              - lambda: |-
-                  id(error_active) = false;
-                  id(conversation_had_tts) = false;
-                  id(follow_up_open) = false;
-                  id(pending_follow_up) = false;
-                  id(assistant_state) = id(mic_muted) ? ${state_muted} : ${state_idle};
-              - script.execute: update_leds
-              - script.execute: rearm_hotword
-              - script.execute: maybe_power_down_amp
-          - condition:
-              lambda: return id(pending_follow_up);
-            sequence:
-              - script.execute: open_follow_up_session
-          - default:
-              - if:
-                  condition:
-                    lambda: return id(conversation_had_tts) && !id(mic_muted) && !id(dnd_active);
+      - if:
+          condition:
+            lambda: return id(error_active);
+          then:
+            - lambda: |-
+                id(error_active) = false;
+                id(conversation_had_tts) = false;
+                id(follow_up_open) = false;
+                id(pending_follow_up) = false;
+                id(assistant_state) = id(mic_muted) ? ${state_muted} : ${state_idle};
+            - script.execute: update_leds
+            - script.execute: rearm_hotword
+            - script.execute: maybe_power_down_amp
+          else:
+            - if:
+                condition:
+                  lambda: return id(pending_follow_up);
                 then:
-                  - script.execute: play_success_sound
-              - lambda: |-
-                  id(conversation_had_tts) = false;
-                  id(follow_up_open) = false;
-                  id(pending_follow_up) = false;
-                  id(assistant_state) = id(mic_muted) ? ${state_muted} : ${state_idle};
-              - script.execute: update_leds
-              - script.execute: rearm_hotword
-              - script.execute: maybe_power_down_amp
+                  - script.execute: open_follow_up_session
+                else:
+                  - if:
+                      condition:
+                        lambda: return id(conversation_had_tts) && !id(mic_muted) && !id(dnd_active);
+                      then:
+                        - script.execute: play_success_sound
+                  - lambda: |-
+                      id(conversation_had_tts) = false;
+                      id(follow_up_open) = false;
+                      id(pending_follow_up) = false;
+                      id(assistant_state) = id(mic_muted) ? ${state_muted} : ${state_idle};
+                  - script.execute: update_leds
+                  - script.execute: rearm_hotword
+                  - script.execute: maybe_power_down_amp
       - lambda: |-
           id(conversation_had_tts) = false;
           id(follow_up_open) = false;
@@ -1292,28 +1295,25 @@ script:
     then:
       - if:
           condition:
-            and:
-              - lambda: return ${dnd_schedule_enabled};
-              - switch.is_on: dnd_schedule_switch
-              - time.has_time: sntp_time
-        then:
-          - lambda: |-
-              auto now = id(sntp_time).now();
-              if (!now.is_valid()) {
-                return;
-              }
-              int start_minutes = ${dnd_start_hour} * 60 + ${dnd_start_minute};
-              int end_minutes = ${dnd_end_hour} * 60 + ${dnd_end_minute};
-              int current = now.hour * 60 + now.minute;
-              bool active = false;
-              if (start_minutes <= end_minutes) {
-                active = current >= start_minutes && current < end_minutes;
-              } else {
-                active = (current >= start_minutes) || (current < end_minutes);
-              }
-              id(schedule_dnd) = active;
-        else:
-          - lambda: id(schedule_dnd) = false;
+            lambda: return ${dnd_schedule_enabled} && id(dnd_schedule_switch).state && id(sntp_time).now().is_valid();
+          then:
+            - lambda: |-
+                auto now = id(sntp_time).now();
+                if (!now.is_valid()) {
+                  return;
+                }
+                int start_minutes = ${dnd_start_hour} * 60 + ${dnd_start_minute};
+                int end_minutes = ${dnd_end_hour} * 60 + ${dnd_end_minute};
+                int current = now.hour * 60 + now.minute;
+                bool active = false;
+                if (start_minutes <= end_minutes) {
+                  active = current >= start_minutes && current < end_minutes;
+                } else {
+                  active = (current >= start_minutes) || (current < end_minutes);
+                }
+                id(schedule_dnd) = active;
+          else:
+            - lambda: id(schedule_dnd) = false;
       - script.execute: update_dnd_state
   - id: update_dnd_state
     mode: restart
@@ -1325,13 +1325,13 @@ script:
       - if:
           condition:
             lambda: return id(dnd_state_changed);
-        then:
-          - if:
-              condition:
-                lambda: return id(dnd_active);
-            then:
-              - script.execute: stop_active_audio
-          - script.execute: rearm_hotword
+          then:
+            - if:
+                condition:
+                  lambda: return id(dnd_active);
+                then:
+                  - script.execute: stop_active_audio
+                  - script.execute: rearm_hotword
       - script.execute: update_leds
       - lambda: id(dnd_state_changed) = false
   - id: toggle_mute
@@ -1339,7 +1339,7 @@ script:
       - if:
           condition:
             lambda: return id(software_muted);
-        then:
-          - switch.turn_off: software_mute_switch
-        else:
-          - switch.turn_on: software_mute_switch
+          then:
+            - switch.turn_off: software_mute_switch
+          else:
+            - switch.turn_on: software_mute_switch
