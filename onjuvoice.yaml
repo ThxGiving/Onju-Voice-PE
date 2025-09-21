@@ -204,7 +204,8 @@ api:
 ota:
   - platform: esphome
     password: !secret ota_password
-    safe_mode: true
+
+safe_mode:
 
 network:
   enable_ipv6: true
@@ -572,6 +573,103 @@ switch:
       number: ${dac_mute_pin}
       inverted: true
 
+select:
+  - platform: template
+    id: idle_led_animation_select
+    name: "${friendly_name} Idle Animation"
+    icon: mdi:led-strip-variant
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: 'idle_breathe'
+    options: &led_effect_options
+      - 'idle_breathe'
+      - 'wake_flash'
+      - 'listening_spinner'
+      - 'processing_pulse'
+      - 'speaking_wipe'
+      - 'error_flash'
+      - 'none'
+    set_action:
+      - script.execute: update_leds
+  - platform: template
+    id: dnd_led_animation_select
+    name: "${friendly_name} DND Animation"
+    icon: mdi:led-strip-variant
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: 'idle_breathe'
+    options: *led_effect_options
+    set_action:
+      - script.execute: update_leds
+  - platform: template
+    id: listening_led_animation_select
+    name: "${friendly_name} Listening Animation"
+    icon: mdi:led-strip-variant
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: 'listening_spinner'
+    options: *led_effect_options
+    set_action:
+      - script.execute: update_leds
+  - platform: template
+    id: processing_led_animation_select
+    name: "${friendly_name} Processing Animation"
+    icon: mdi:led-strip-variant
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: 'processing_pulse'
+    options: *led_effect_options
+    set_action:
+      - script.execute: update_leds
+  - platform: template
+    id: speaking_led_animation_select
+    name: "${friendly_name} Speaking Animation"
+    icon: mdi:led-strip-variant
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: 'speaking_wipe'
+    options: *led_effect_options
+    set_action:
+      - script.execute: update_leds
+  - platform: template
+    id: error_led_animation_select
+    name: "${friendly_name} Error Animation"
+    icon: mdi:led-strip-variant
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: 'error_flash'
+    options: *led_effect_options
+    set_action:
+      - script.execute: update_leds
+  - platform: template
+    id: muted_led_animation_select
+    name: "${friendly_name} Muted Animation"
+    icon: mdi:led-strip-variant
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: 'none'
+    options: *led_effect_options
+    set_action:
+      - script.execute: update_leds
+  - platform: template
+    id: wake_led_animation_select
+    name: "${friendly_name} Wake Animation"
+    icon: mdi:led-strip-variant
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: 'wake_flash'
+    options: *led_effect_options
+    set_action:
+      - script.execute: update_leds
+
 esp32_touch:
   sleep_duration: 1ms
   measurement_duration: 800us
@@ -744,7 +842,7 @@ script:
                   sequence:
                     - light.turn_on:
                         id: ring_light
-                        effect: none
+                        effect: !lambda return id(muted_led_animation_select).state;
                         brightness: 35%
                         red: 100%
                         green: 10%
@@ -754,7 +852,7 @@ script:
                   sequence:
                     - light.turn_on:
                         id: ring_light
-                        effect: error_flash
+                        effect: !lambda return id(error_led_animation_select).state;
                         brightness: 100%
                         red: 100%
                         green: 0%
@@ -764,7 +862,7 @@ script:
                   sequence:
                     - light.turn_on:
                         id: ring_light
-                        effect: idle_breathe
+                        effect: !lambda return id(dnd_led_animation_select).state;
                         brightness: 20%
                         red: 50%
                         green: 0%
@@ -774,7 +872,7 @@ script:
                   sequence:
                     - light.turn_on:
                         id: ring_light
-                        effect: listening_spinner
+                        effect: !lambda return id(listening_led_animation_select).state;
                         brightness: ${led_listening_brightness}
                         red: 5%
                         green: 90%
@@ -784,7 +882,7 @@ script:
                   sequence:
                     - light.turn_on:
                         id: ring_light
-                        effect: processing_pulse
+                        effect: !lambda return id(processing_led_animation_select).state;
                         brightness: ${led_processing_brightness}
                         red: 100%
                         green: 50%
@@ -794,7 +892,7 @@ script:
                   sequence:
                     - light.turn_on:
                         id: ring_light
-                        effect: speaking_wipe
+                        effect: !lambda return id(speaking_led_animation_select).state;
                         brightness: ${led_speaking_brightness}
                         red: 80%
                         green: 60%
@@ -802,7 +900,7 @@ script:
                 - default:
                     - light.turn_on:
                         id: ring_light
-                        effect: idle_breathe
+                        effect: !lambda return id(idle_led_animation_select).state;
                         brightness: ${led_idle_brightness}
                         red: 0%
                         green: 30%
@@ -832,7 +930,7 @@ script:
           then:
             - light.turn_on:
                 id: ring_light
-                effect: wake_flash
+                effect: !lambda return id(wake_led_animation_select).state;
                 brightness: ${led_listening_brightness}
                 red: 100%
                 green: 60%
