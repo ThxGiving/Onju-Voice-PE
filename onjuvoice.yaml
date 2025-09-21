@@ -279,8 +279,6 @@ microphone:
     bits_per_sample: 32bit
     pdm: false
     adc_type: external
-    dma_buffer_count: 8
-    dma_buffer_size: 256
 
 media_player:
   - platform: speaker
@@ -589,7 +587,7 @@ select:
       - 'processing_pulse'
       - 'speaking_wipe'
       - 'error_flash'
-      - 'none'
+      - 'None'
     set_action:
       - script.execute: update_leds
   - platform: template
@@ -654,7 +652,7 @@ select:
     entity_category: config
     optimistic: true
     restore_value: true
-    initial_option: 'none'
+    initial_option: 'None'
     options: *led_effect_options
     set_action:
       - script.execute: update_leds
