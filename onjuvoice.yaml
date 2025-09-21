@@ -1,647 +1,1249 @@
+# =============================================================================
+# README (Onju Voice Satellite w/ ESPHome 2025.9.0)
+# Hardware pin map (update substitutions below if your PCB revisions differ):
+#   • I²S BCLK  -> ${i2s_bclk_pin}
+#   • I²S LRCLK -> ${i2s_lrclk_pin}
+#   • I²S DOUT  -> ${i2s_dout_pin} (DAC / speaker)
+#   • I²S DIN   -> ${i2s_din_pin}  (microphone)
+#   • LED ring  -> ${led_data_pin} (${led_pixel_count} px, ${ws2812_variant})
+#   • Touch / button -> ${button_touch_pin}
+#   • Mic-mute slide (optional) -> ${mute_switch_pin}
+#   • Mic-mute LED (optional) -> ${mute_led_pin} (enable via ${mute_led_enabled})
+#   • Amplifier enable -> ${amp_enable_pin} | DAC mute -> ${dac_mute_pin}
+#
+# Remote asset layout (no local FS needed):
+#   Attention cues & follow-up tones default to the Home Assistant Voice PE
+#   GitHub URLs. Update the *_sound_url substitutions to point at your own
+#   HTTPS-hosted WAV/FLAC assets if you prefer custom UX sounds.
+#   Wake-word models can be swapped by pointing ${wake_word_model_url} at any
+#   microWakeWord JSON/ZIP endpoint (e.g. GitHub release URLs).
+#
+# Assist pipeline: set ${assist_pipeline} to your Home Assistant Assist pipeline
+#   entity_id (e.g. assist_pipeline.default) and ${assist_language} to the
+#   pipeline language code used in Home Assistant.
+#
+# Wake word: defaults to the "okay nabu" microWakeWord release shared by Home
+#   Assistant Voice PE. Drop in alternative models by updating the URL &
+#   ${wake_word_name}. Keep the optional stop model for barge-in cancelation.
+#
+# Follow-up listening: Home Assistant automations can call API service
+#   `expect_follow_up` with `expected: true` when the Assist response metadata
+#   indicates a follow-up is expected. Fallback behaviour is controlled by
+#   ${listen_after_questions_default} (set true to force a follow-up window when
+#   HA metadata is unavailable).
+# =============================================================================
+# Feature Parity Checklist (HA Voice PE -> Onju Voice):
+#   Wake word + UX → micro_wake_word + script.prepare_session/on_wake_word_detected
+#   Barge-in + tap-to-talk → scripts.stop_active_audio/start_session_manual/toggle_mute
+#   Attention/busy/error tones → cues_player + play_* scripts (remote GitHub assets)
+#   LED state machine → light.ring_light + script.update_leds (idle/listen/process/speak/error/mute/DND)
+#   Streaming Assist replies → voice_assistant + pipeline_player (resampler+mixer for partial TTS)
+#   Listen after questions → finalize_session/open_follow_up_session + follow_up_guard (+ expect_follow_up API)
+#   Follow-up cue → play_follow_up_sound + remote ${follow_up_sound_url}
+#   Mic mute & hardware override → software_mute_switch + hardware_mute_switch + apply_mute_state (+ mute LED)
+#   DND manual/schedule → evaluate_dnd/update_dnd_state + switches dnd_manual_switch/dnd_schedule_switch
+#   OTA/logging/recovery → wifi/api/logger/ota/captive_portal/improv_serial sections
+# =============================================================================
+# Tuning Tips:
+#   • Adjust ${microphone_gain} (micro_wake_word) and voice_assistant auto_gain/noise_suppression for room acoustics.
+#   • Modify ${vad_silence_timeout}, ${vad_end_timeout}, ${vad_max_duration} to change VAD sensitivity/timeouts.
+#   • Swap attention WAV/FLAC URLs in substitutions to align with your brand.
+#   • Edit script.update_leds / light effects to match your LED ring size or branding.
+#   • Set ${listen_after_questions_default} to true to always open follow-ups if HA metadata is absent.
+# =============================================================================
+
 substitutions:
-  name: nabu1-24b23c
-  friendly_name: onju voice satellite 24b23c
-  project_version: "1.1.0"
-  device_description: "Onju Voice Satellite with ESPHome software and microWakeWord"
-  api_key: "+BnEBlDWkYn666c8alGueV3cmXCfRxNfEYNao+Ou0dQ="
-  ota_password: "f9fe329152710e9a38377f8f6c79bb70"
-  twinkle_probability: "0.05"
-  model_url: "http://192.168.3.3:8123/local/models/okay_nabu.json"
-  wakeup_sound_url: "http://192.168.3.3:8123/local/sounds/wake_word_triggered.flac" # New Notification #7 by UNIVERSFIELD https://freesound.org/people/UNIVERSFIELD/sounds/736267/
-  error_sound_url: "http://192.168.3.3:8123/local/sounds/error.mp3" # Error #8 by UNIVERSFIELD https://freesound.org/people/UNIVERSFIELD/sounds/734442/
-  timer_finished_sound_url: "http://192.168.3.3:8123/local/sounds/timer_finished.flac" # New Notification #6 by UNIVERSFIELD https://freesound.org/people/UNIVERSFIELD/sounds/734445/
+  device_name: onju-voice-satellite
+  friendly_name: Onju Voice Satellite
+  project_version: "2.0.0"
+  device_description: "Onju Voice ESP32-S3 satellite with ESPHome Assist pipeline"
+  assist_pipeline: assist_pipeline.default
+  assist_language: en-US
+  wifi_fast_connect: "false"
+  timezone: "Etc/UTC"
+  audio_sample_rate: "48000"
+  microphone_gain: "4"
+  led_enabled: "true"
+  led_pixel_count: "12"
+  led_data_pin: GPIO11
+  ws2812_variant: SK6812
+  led_idle_brightness: "35%"
+  led_listening_brightness: "100%"
+  led_processing_brightness: "90%"
+  led_speaking_brightness: "85%"
+  wake_word_model_url: "https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json"
+  wake_word_name: "okay nabu"
+  wake_word_start_delay: "120ms"
+  follow_up_timeout: "7s"
+  follow_up_sound_url: "https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_double_press.flac"
+  start_listening_sound_url: "https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/wake_word_triggered.flac"
+  end_listening_sound_url: "https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/mute_switch_off.flac"
+  thinking_sound_url: "https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_press.flac"
+  success_sound_url: "https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/jack_connected.flac"
+  error_sound_url: "https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/jack_disconnected.flac"
+  busy_sound_url: "https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/center_button_triple_press.flac"
+  attention_volume: "0.65"
+  pipeline_volume: "0.85"
+  vad_silence_timeout: "1200ms"
+  vad_end_timeout: "600ms"
+  vad_max_duration: "15000ms"
+  listen_after_questions_default: "false"
+  button_touch_pin: GPIO3
+  button_touch_threshold: "750000"
+  button_short_press_max: "600ms"
+  button_long_press_min: "900ms"
+  mute_switch_pin: GPIO38
+  mute_led_enabled: "false"
+  mute_led_pin: GPIO7
+  amp_enable_pin: GPIO1
+  dac_mute_pin: GPIO21
+  i2s_lrclk_pin: GPIO13
+  i2s_bclk_pin: GPIO18
+  i2s_dout_pin: GPIO12
+  i2s_din_pin: GPIO17
+  wifi_reboot_timeout: "15min"
+  dnd_schedule_enabled: "true"
+  dnd_start_hour: "23"
+  dnd_start_minute: "00"
+  dnd_end_hour: "06"
+  dnd_end_minute: "30"
+  state_idle: "0"
+  state_listening: "2"
+  state_processing: "3"
+  state_speaking: "4"
+  state_error: "5"
+  state_muted: "6"
 
 esphome:
-  name: "${name}"
+  name: "${device_name}"
   friendly_name: "${friendly_name}"
   comment: "${device_description}"
-  name_add_mac_suffix: false
+  name_add_mac_suffix: true
   project:
-    name: tetele.onju_voice_satellite
+    name: onju.voice_satellite
     version: "${project_version}"
-  platformio_options:
-    board_build.flash_mode: dio
-    board_build.arduino.memory_type: qio_opi
+  min_version: 2025.9.0
   on_boot:
+    priority: 600
     then:
-      - light.turn_on:
-          id: top_led
-          effect: slow_pulse
-          red: 100%
-          green: 60%
-          blue: 0%
-      - wait_until:
+      - switch.turn_on: speaker_soft_mute
+      - switch.turn_off: speaker_amp
+      - if:
           condition:
-            wifi.connected:
-      - light.turn_on:
-          id: top_led
-          effect: pulse
-          red: 0%
-          green: 100%
-          blue: 0%
-      - wait_until:
-          condition:
-            api.connected:
-      - light.turn_on:
-          id: top_led
-          effect: none
-          red: 0%
-          green: 100%
-          blue: 0%
+            lambda: return id(software_muted);
+          then:
+            - switch.turn_on: software_mute_switch
+      - lambda: |-
+          id(assistant_state) = ${state_idle};
+          id(conversation_active) = false;
+      - script.execute: update_leds
       - delay: 1s
-      - script.execute: reset_led
+      - script.execute: apply_mute_state
+      - script.execute: evaluate_dnd
+      - script.execute: rearm_hotword
 
 esp32:
   board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
   framework:
     type: esp-idf
+    version: recommended
+    sdkconfig_options:
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
 
 psram:
   mode: octal
   speed: 80MHz
 
-# Enable logging
-logger:
-  level: DEBUG
-  logs:
-    media_player: DEBUG
-    speaker: DEBUG
-    http_client: DEBUG
-
-# Allow OTA updates
-ota:
-  platform: esphome
-  password: ${ota_password}
-
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  #fast_connect: true
+  fast_connect: ${wifi_fast_connect}
+  reboot_timeout: ${wifi_reboot_timeout}
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: "OnjuVoiceSetup"
+  on_connect:
+    - script.execute: evaluate_dnd
+    - script.execute: rearm_hotword
+  on_disconnect:
+    - micro_wake_word.stop
+    - script.execute: update_leds
+
+captive_portal:
+
+improv_serial:
+
+logger:
+  level: INFO
+  baud_rate: 0
 
 api:
   encryption:
-    key: ${api_key}
+    key: !secret api_encryption_key
+  reboot_timeout: 0s
   services:
-    - service: start_va
+    - service: expect_follow_up
+      variables:
+        expected: bool
       then:
-        - voice_assistant.start
-    - service: stop_va
+        - lambda: id(follow_up_hint) = expected;
+    - service: play_feedback
+      variables:
+        sound: string
       then:
-        - voice_assistant.stop
-    - service: notification_on
-      then:
-        - script.execute: turn_on_notification
-    - service: notification_clear
-      then:
-        - script.execute: clear_notification
+        - script.execute:
+            id: play_sound_router
+            sound: !lambda return sound;
 
-globals:
-  - id: notification
-    type: bool
-    restore_value: false
-  - id: volume_touched
-    type: bool
-    restore_value: no
-    initial_value: "false"
+ota:
+  - platform: esphome
+    password: !secret ota_password
+    safe_mode: true
 
-micro_wake_word:
-  models:
-    - model: "${model_url}"
-  microphone: 
-    microphone: nabu_mic
-    channels: 1
-    gain_factor: 4
-  on_wake_word_detected:
-    - media_player.speaker.play_on_device_media_file:
-        media_file: wakeup
-        announcement: true
-    - wait_until:
-        media_player.is_announcing:
-    - wait_until:
-        not:
-          media_player.is_announcing:
-    - delay: 250ms
-    - voice_assistant.start:
-        wake_word: !lambda return wake_word;
+network:
+  enable_ipv6: true
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: ${timezone}
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+    on_time:
+      - seconds: 0
+        minutes: /5
+        then:
+          - script.execute: evaluate_dnd
 
 i2s_audio:
-  - id: i2s_output
+  - id: i2s_out
     i2s_lrclk_pin:
-      number: GPIO13
+      number: ${i2s_lrclk_pin}
       allow_other_uses: true
     i2s_bclk_pin:
-      number: GPIO18
+      number: ${i2s_bclk_pin}
       allow_other_uses: true
-
-  - id: i2s_input
+  - id: i2s_in
     i2s_lrclk_pin:
-      number: GPIO13
+      number: ${i2s_lrclk_pin}
       allow_other_uses: true
     i2s_bclk_pin:
-      number: GPIO18
+      number: ${i2s_bclk_pin}
       allow_other_uses: true
 
 speaker:
   - platform: i2s_audio
-    id: onju_out
-    sample_rate: 48000
+    id: speaker_hw
+    i2s_audio_id: i2s_out
+    i2s_dout_pin: ${i2s_dout_pin}
+    sample_rate: ${audio_sample_rate}
     bits_per_sample: 16bit
-    i2s_mode: primary
-    i2s_dout_pin: GPIO12
-    i2s_audio_id: i2s_output
-    dac_type: external
     channel: stereo
+    dac_type: external
+    i2s_mode: primary
     timeout: 500ms
     buffer_duration: 200ms
   - platform: mixer
-    id: mixer_speaker_id
-    output_speaker: onju_out
+    id: speaker_mixer
+    output_speaker: speaker_hw
     source_speakers:
-      - id: announcement_spk_mixer_input
-        timeout: 1000ms
-      - id: media_spk_mixer_input
-        timeout: 1000ms
+      - id: cues_stream
+        timeout: 1500ms
+      - id: pipeline_stream
+        timeout: 4000ms
   - platform: resampler
-    id: media_spk_resampling_input
-    output_speaker: media_spk_mixer_input
+    id: cues_stream
+    output_speaker: speaker_mixer
+    sample_rate: ${audio_sample_rate}
   - platform: resampler
-    id: announcement_spk_resampling_input
-    output_speaker: announcement_spk_mixer_input
+    id: pipeline_stream
+    output_speaker: speaker_mixer
+    sample_rate: ${audio_sample_rate}
 
 microphone:
   - platform: i2s_audio
-    id: nabu_mic
-    i2s_din_pin: GPIO17
-    adc_type: external
+    id: onju_mic
+    i2s_audio_id: i2s_in
+    i2s_din_pin: ${i2s_din_pin}
     use_apll: true
-    pdm: false
-    sample_rate: 16000
+    channel: left
+    sample_rate: ${audio_sample_rate}
     bits_per_sample: 32bit
-    i2s_mode: primary
-    i2s_audio_id: i2s_input
-    channel: stereo # e.g. left mic
-    
+    pdm: false
+    adc_type: external
+    dma_buffer_count: 8
+    dma_buffer_size: 256
+
 media_player:
   - platform: speaker
-    name: "Media Player"
-    id: nabu
-    media_pipeline:
-      speaker: media_spk_resampling_input
-      num_channels: 2
-    announcement_pipeline:
-      speaker: announcement_spk_resampling_input
-      num_channels: 1
-    files:
-      - id: wakeup
-        file: "${wakeup_sound_url}"
-      - id: error
-        file: "${error_sound_url}"
-      - id: timer_finished
-        file: "${timer_finished_sound_url}"
-    on_state:
-      then:
-        - lambda: |-
-            static float old_volume = -1;
-            float new_volume = id(nabu).volume;
-            if(abs(new_volume-old_volume) > 0.0001) {
-              if(old_volume != -1) {
-                id(show_volume)->execute();
-              }
-            }
-            old_volume = new_volume;
-    on_announcement:
-      - switch.turn_off: dac_mute
-      - lambda: |-
-          id(nabu_mic).stop();
+    id: cues_player
+    internal: true
+    name: "${friendly_name} cues"
+    speaker: cues_stream
+    num_channels: 2
+    format: FLAC
+    sample_rate: ${audio_sample_rate}
+    volume: ${attention_volume}
     on_play:
-      - switch.turn_off: dac_mute
-      - lambda: |-
-          id(nabu_mic).stop();
-    on_pause:
-      - delay: 250ms
-      - lambda: |-
-          id(onju_out).stop();
-      - delay: 250ms
-      - lambda: |-
-          id(nabu_mic).start();
+      - script.execute: ensure_amp_on
+    on_announcement:
+      - script.execute: ensure_amp_on
     on_idle:
-      - switch.turn_on: dac_mute
-      - delay: 50ms
-      - lambda: id(onju_out).stop();
-      - delay: 250ms
-      - lambda: |-
-          id(onju_out).stop();
-      - delay: 250ms
-      - lambda: |-
-          id(nabu_mic).start();
+      - script.execute: maybe_power_down_amp
+    files:
+      - id: start_listen
+        file: ${start_listening_sound_url}
+      - id: end_listen
+        file: ${end_listening_sound_url}
+      - id: thinking
+        file: ${thinking_sound_url}
+      - id: success
+        file: ${success_sound_url}
+      - id: error
+        file: ${error_sound_url}
+      - id: busy
+        file: ${busy_sound_url}
+      - id: follow_up
+        file: ${follow_up_sound_url}
+  - platform: speaker
+    id: pipeline_player
+    internal: true
+    name: "${friendly_name} assist"
+    speaker: pipeline_stream
+    num_channels: 2
+    format: WAV
+    sample_rate: ${audio_sample_rate}
+    volume: ${pipeline_volume}
+    on_play:
+      - script.execute: ensure_amp_on
+    on_pause:
+      - script.execute: maybe_power_down_amp
+    on_idle:
+      - script.execute: maybe_power_down_amp
 
-button:
-  - platform: template
-    name: Nabu 2 start mic
-    on_press:
-      - lambda: |-
-          id(nabu_mic).start();
-  - platform: template
-    name: Nabu 2 stop mic
-    on_press:
-      - lambda: |-
-          id(nabu_mic).stop();
-  - platform: template
-    name: Nabu 2 start wake
-    on_press:
-      - micro_wake_word.start:
-  - platform: template
-    name: Nabu 2 stop wake
-    on_press:
-      - micro_wake_word.stop:
+micro_wake_word:
+  id: mww
+  microphone:
+    microphone: onju_mic
+    channels: 1
+    gain_factor: ${microphone_gain}
+  stop_after_detection: false
+  models:
+    - id: primary
+      model: ${wake_word_model_url}
+      label: ${wake_word_name}
+    - id: stop
+      model: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
+      label: "stop"
+      internal: true
+  on_wake_word_detected:
+    - if:
+        condition:
+          lambda: return id(mic_muted) || id(dnd_active);
+        then:
+          - script.execute: play_busy_sound
+        else:
+          - script.execute:
+              id: prepare_session
+              sound: "start"
+          - voice_assistant.start:
+              id: va
+              pipeline: ${assist_pipeline}
+              wake_word: !lambda return wake_word;
 
 voice_assistant:
   id: va
-  microphone: 
-    microphone: nabu_mic
-    channels: 0
-  media_player:
+  pipeline: ${assist_pipeline}
+  language: ${assist_language}
+  microphone:
+    microphone: onju_mic
+    channels: 1
+  media_player: pipeline_player
+  micro_wake_word: mww
   use_wake_word: false
+  noise_suppression_level: 2
+  auto_gain: -4 dbfs
+  volume_multiplier: 1.0
+  stt_vad:
+    mode: webrtc
+    silence_ms: ${vad_silence_timeout}
+    end_ms: ${vad_end_timeout}
+    max_ms: ${vad_max_duration}
+  on_start:
+    - lambda: id(conversation_active) = true;
+    - micro_wake_word.stop
   on_listening:
-    - light.turn_on:
-        id: top_led
-        blue: 100%
-        red: 100%
-        green: 100%
-        brightness: 100%
-        effect: listening
+    - lambda: id(assistant_state) = ${state_listening};
+    - script.execute: update_leds
+  on_stt_vad_start:
+    - lambda: id(assistant_state) = ${state_listening};
+    - script.execute: update_leds
   on_stt_vad_end:
-    - delay: 200ms
-    - light.turn_on:
-        id: top_led
-        blue: 100%
-        red: 0%
-        green: 20%
-        brightness: 70%
-        effect: processing
-  on_tts_end:
-    - light.turn_on:
-        id: top_led
-        blue: 0%
-        red: 20%
-        green: 100%
-        effect: speaking
-  on_idle:
-    - logger.log: "voice assist idle"
-  on_end:
-    - logger.log: "calling on end"
-    - delay: 5s
-    - wait_until:
-        not:
-          speaker.is_playing:
-            id: announcement_spk_mixer_input
-    - script.execute: reset_led
-  #  - logger.log: "Really on end now"
-  #  - if:
-  #      condition:
-  #        and:
-  #          - switch.is_on: use_wake_word
-  #          - binary_sensor.is_off: mute_switch
-  #      then:
-  #        - micro_wake_word.start:
-  on_client_connected:
+    - lambda: id(assistant_state) = ${state_processing};
+    - script.execute: update_leds
+    - script.execute: play_end_sound
+    - script.execute: play_thinking_sound
+  on_intent_progress:
     - if:
         condition:
-          and:
-            - switch.is_on: use_wake_word
-            - binary_sensor.is_off: mute_switch
+          lambda: 'return !x.empty();'
         then:
-          - micro_wake_word.start:
-  on_client_disconnected:
-    - if:
-        condition:
-          and:
-            - switch.is_on: use_wake_word
-            - binary_sensor.is_off: mute_switch
-        then:
-          - voice_assistant.stop:
-          - micro_wake_word.stop:
+          - lambda: id(assistant_state) = ${state_speaking};
+          - script.execute: update_leds
+          - script.execute: ensure_amp_on
+  on_tts_start:
+    - lambda: id(assistant_state) = ${state_speaking};
+    - lambda: id(conversation_had_tts) = true;
+    - script.execute: update_leds
+    - script.execute: ensure_amp_on
   on_error:
-    #- media_player.play_media: "${error_sound_url}"
-    - media_player.speaker.play_on_device_media_file:
-        media_file: error
-        announcement: true
-    - light.turn_on:
-        id: top_led
-        blue: 0%
-        red: 100%
-        green: 0%
-        effect: none
-    - delay: 1s
-    - script.execute: reset_led
-  on_timer_started:
-    - light.turn_on:
-        id: top_led
-        effect: random_twinkle
-  on_timer_finished:
-    - media_player.play_media: "${timer_finished_sound_url}"
-    # - media_player.speaker.play_on_device_media_file:
-    #     media_file: timer_finished
-    #     announcement: true
-    - light.turn_on:
-        id: top_led
-        blue: 0%
-        red: 100%
-        green: 80%
-        effect: slow_pulse
-    - delay: 5s
-    - script.execute: reset_led
-
-esp32_touch:
-  setup_mode: false
-  sleep_duration: 2ms
-  measurement_duration: 800us
-  low_voltage_reference: 0.8V
-  high_voltage_reference: 2.4V
-
-  filter_mode: IIR_16
-  debounce_count: 2
-  noise_threshold: 0
-  jitter_step: 0
-  smooth_mode: IIR_2
-
-  denoise_grade: BIT8
-  denoise_cap_level: L0
-
-binary_sensor:
-  - platform: esp32_touch
-    id: volume_down
-    pin: "GPIO4"
-    threshold: 539000
-    on_press:
-      then:
-        - light.turn_on: left_led
-        - script.execute:
-            id: set_volume
-            volume: -0.05
-        - delay: 750ms
-        - while:
-            condition:
-              binary_sensor.is_on: volume_down
-            then:
-              - script.execute:
-                  id: set_volume
-                  volume: -0.05
-              - delay: 150ms
-    on_release:
-      then:
-        - light.turn_off: left_led
-
-  - platform: esp32_touch
-    id: volume_up
-    pin: "GPIO2"
-    threshold: 580000
-    on_press:
-      then:
-        - light.turn_on: right_led
-        - script.execute:
-            id: set_volume
-            volume: 0.05
-        - delay: 750ms
-        - while:
-            condition:
-              binary_sensor.is_on: volume_up
-            then:
-              - script.execute:
-                  id: set_volume
-                  volume: 0.05
-              - delay: 100ms
-    on_release:
-      then:
-        - light.turn_off: right_led
-
-  - platform: esp32_touch
-    id: action
-    pin: "GPIO3"
-    threshold: 751000
-
-  - platform: gpio
-    id: mute_switch
-    pin:
-      number: GPIO38
-      mode: INPUT_PULLUP
-    name: Disable wake word
-    on_press:
-      - script.execute: turn_off_wake_word
-    on_release:
-      - script.execute: turn_on_wake_word
+    - lambda: |-
+        id(error_active) = true;
+        id(last_error_code) = code;
+        id(assistant_state) = ${state_error};
+    - script.execute: update_leds
+    - script.execute: play_error_sound
+  on_end:
+    - script.execute: finalize_session
+  on_client_connected:
+    - script.execute: rearm_hotword
+  on_client_disconnected:
+    - voice_assistant.stop:
+        id: va
+    - script.execute: stop_active_audio
 
 light:
   - platform: esp32_rmt_led_strip
-    id: leds
-    pin: GPIO11
-    chipset: SK6812
-    num_leds: 6
+    id: ring_pixels
+    internal: true
+    pin: ${led_data_pin}
+    chipset: ${ws2812_variant}
+    num_leds: ${led_pixel_count}
     rgb_order: grb
     default_transition_length: 0s
-    gamma_correct: 2.8
-  - platform: partition
-    id: left_led
-    segments:
-      - id: leds
-        from: 0
-        to: 0
-    default_transition_length: 100ms
-  - platform: partition
-    id: top_led
-    segments:
-      - id: leds
-        from: 1
-        to: 4
-    default_transition_length: 100ms
     effects:
       - pulse:
-          name: pulse
-          transition_length: 250ms
-          update_interval: 250ms
-      - pulse:
-          name: slow_pulse
-          transition_length: 1s
+          name: idle_breathe
+          transition_length: 2s
           update_interval: 2s
-      - addressable_twinkle:
-          name: listening_ww_old
-          twinkle_probability: ${twinkle_probability}
-      - addressable_twinkle:
-          name: listening
-          twinkle_probability: 45%
+      - strobe:
+          name: wake_flash
+          colors:
+            - state: ON
+              brightness: 100%
+              red: 100%
+              green: 60%
+              blue: 0%
+              duration: 120ms
+            - state: OFF
+              duration: 80ms
+          num_pulses: 2
       - addressable_scan:
-          name: processing
-          move_interval: 80ms
-      - addressable_flicker:
-          name: speaking
-          intensity: 35%
-      - addressable_lambda:
-          name: show_volume
-          update_interval: 50ms
-          lambda: |-
-            int int_volume = int(id(nabu).volume * 100.0f * it.size());
-            int full_leds = int_volume / 100;
-            int last_brightness = int_volume % 100;
-            int i = 0;
-            for(; i < full_leds; i++) {
-              it[i] = Color::WHITE;
-            }
-            if(i < 4) {
-              it[i++] = Color(64, 64, 64).fade_to_white(last_brightness*256/100);
-            }
-            for(; i < it.size(); i++) {
-              it[i] = Color(64, 64, 64);
-            }
-      - addressable_lambda:
-          name: listening_ww
-          update_interval: 1000ms
-          lambda: |-
-            for (int i = 0; i < it.size(); i++) {
-              it[i] = Color::BLACK;
-            }
+          name: listening_spinner
+          move_interval: 60ms
+          scan_width: 4
+      - addressable_scan:
+          name: processing_pulse
+          move_interval: 90ms
+          scan_width: 5
+      - addressable_twinkle:
+          name: speaking_wipe
+          twinkle_probability: 35%
+          twinkle_speed: 4
+      - strobe:
+          name: error_flash
+          colors:
+            - state: ON
+              brightness: 100%
+              red: 100%
+              green: 0%
+              blue: 0%
+              duration: 180ms
+            - state: ON
+              brightness: 10%
+              red: 15%
+              green: 0%
+              blue: 0%
+              duration: 180ms
+          num_pulses: 6
   - platform: partition
-    id: right_led
+    id: ring_light
     segments:
-      - id: leds
-        from: 5
-        to: 5
-    default_transition_length: 100ms
+      - id: ring_pixels
+        from: 0
+        to: -1
+    default_transition_length: 0s
+
+output:
+  - platform: gpio
+    id: mute_led
+    internal: true
+    pin:
+      number: ${mute_led_pin}
+      inverted: false
+
+switch:
+  - platform: template
+    id: software_mute_switch
+    name: "${friendly_name} Microphone Mute"
+    icon: mdi:microphone-off
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - lambda: id(software_muted) = true;
+      - script.execute: apply_mute_state
+    on_turn_off:
+      - lambda: id(software_muted) = false;
+      - script.execute: apply_mute_state
+  - platform: template
+    id: wake_word_switch
+    name: "${friendly_name} Wake Word"
+    icon: mdi:account-voice
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - script.execute: rearm_hotword
+    on_turn_off:
+      - script.execute: rearm_hotword
+  - platform: template
+    id: attention_sounds_switch
+    name: "${friendly_name} Attention Sounds"
+    icon: mdi:volume-high
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    id: follow_up_switch
+    name: "${friendly_name} Listen After Response"
+    icon: mdi:account-tie-voice
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    id: dnd_manual_switch
+    name: "${friendly_name} Do Not Disturb"
+    icon: mdi:moon-waning-crescent
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - lambda: id(manual_dnd) = true;
+      - script.execute: update_dnd_state
+    on_turn_off:
+      - lambda: id(manual_dnd) = false;
+      - script.execute: update_dnd_state
+  - platform: template
+    id: dnd_schedule_switch
+    name: "${friendly_name} DND Schedule"
+    icon: mdi:calendar-clock
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - script.execute: evaluate_dnd
+    on_turn_off:
+      - script.execute: evaluate_dnd
+  - platform: template
+    id: led_enable_switch
+    name: "${friendly_name} LEDs"
+    icon: mdi:led-strip-variant
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - lambda: id(led_enabled_runtime) = true;
+      - script.execute: update_leds
+    on_turn_off:
+      - lambda: id(led_enabled_runtime) = false;
+      - light.turn_off: ring_light
+  - platform: gpio
+    id: speaker_amp
+    internal: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin: ${amp_enable_pin}
+  - platform: gpio
+    id: speaker_soft_mute
+    internal: true
+    restore_mode: ALWAYS_ON
+    pin:
+      number: ${dac_mute_pin}
+      inverted: true
+
+esp32_touch:
+  sleep_duration: 1ms
+  measurement_duration: 800us
+
+binary_sensor:
+  - platform: esp32_touch
+    id: assistant_button
+    name: "${friendly_name} Touch Button"
+    icon: mdi:gesture-tap-button
+    pin: ${button_touch_pin}
+    threshold: ${button_touch_threshold}
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 30ms
+    on_click:
+      - min_length: 50ms
+        max_length: ${button_short_press_max}
+        then:
+          - script.execute:
+              id: start_session_manual
+              reason: "tap"
+              sound: "start"
+      - min_length: ${button_long_press_min}
+        max_length: 5s
+        then:
+          - script.execute: toggle_mute
+  - platform: gpio
+    id: hardware_mute_switch
+    internal: true
+    pin:
+      number: ${mute_switch_pin}
+      mode: INPUT_PULLUP
+    filters:
+      - delayed_on: 20ms
+      - delayed_off: 20ms
+    on_state:
+      - script.execute: apply_mute_state
+  - platform: template
+    id: dnd_state_sensor
+    name: "${friendly_name} DND Active"
+    device_class: safety
+    entity_category: diagnostic
+    lambda: 'return id(dnd_active);'
+  - platform: template
+    id: follow_up_active_sensor
+    name: "${friendly_name} Follow-up Window"
+    entity_category: diagnostic
+    lambda: 'return id(follow_up_open);'
+
+sensor:
+  - platform: wifi_signal
+    name: "${friendly_name} Wi-Fi RSSI"
+    update_interval: 60s
+  - platform: uptime
+    name: "${friendly_name} Uptime"
+    update_interval: 60s
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "${friendly_name} IP"
+  - platform: template
+    name: "${friendly_name} Assist Phase"
+    update_interval: 2s
+    lambda: |-
+      switch (id(assistant_state)) {
+        case ${state_idle}:
+          return id(follow_up_open) ? "follow-up-ready" : "idle";
+        case ${state_listening}:
+          return "listening";
+        case ${state_processing}:
+          return "processing";
+        case ${state_speaking}:
+          return "speaking";
+        case ${state_error}:
+          return "error";
+        case ${state_muted}:
+          return "muted";
+        default:
+          return "idle";
+      }
+  - platform: template
+    name: "${friendly_name} Last Error"
+    entity_category: diagnostic
+    update_interval: 5s
+    lambda: |-
+      return id(last_error_code);
+
+button:
+  - platform: restart
+    name: "${friendly_name} Restart"
+    entity_category: diagnostic
+  - platform: safe_mode
+    name: "${friendly_name} Safe Mode"
+    entity_category: diagnostic
+
+globals:
+  - id: assistant_state
+    type: uint8_t
+    restore_value: no
+    initial_value: ${state_idle}
+  - id: software_muted
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+  - id: mic_muted
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: error_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: conversation_had_tts
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: conversation_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: follow_up_hint
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: follow_up_open
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: pending_follow_up
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: led_enabled_runtime
+    type: bool
+    restore_value: yes
+    initial_value: ${led_enabled}
+  - id: last_error_code
+    type: std::string
+    restore_value: no
+    initial_value: "\"\""
+  - id: manual_dnd
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+  - id: schedule_dnd
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: dnd_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: dnd_state_changed
+    type: bool
+    restore_value: no
+    initial_value: 'false'
 
 script:
-  - id: set_volume
+  - id: update_leds
+    mode: queued
+    then:
+      - if:
+          condition:
+            lambda: return id(led_enabled_runtime);
+          then:
+            - choose:
+                - condition:
+                    lambda: return id(mic_muted);
+                  sequence:
+                    - light.turn_on:
+                        id: ring_light
+                        effect: none
+                        brightness: 35%
+                        red: 100%
+                        green: 10%
+                        blue: 10%
+                - condition:
+                    lambda: return id(assistant_state) == ${state_error};
+                  sequence:
+                    - light.turn_on:
+                        id: ring_light
+                        effect: error_flash
+                        brightness: 100%
+                        red: 100%
+                        green: 0%
+                        blue: 0%
+                - condition:
+                    lambda: return id(dnd_active);
+                  sequence:
+                    - light.turn_on:
+                        id: ring_light
+                        effect: idle_breathe
+                        brightness: 20%
+                        red: 50%
+                        green: 0%
+                        blue: 80%
+                - condition:
+                    lambda: return id(assistant_state) == ${state_listening};
+                  sequence:
+                    - light.turn_on:
+                        id: ring_light
+                        effect: listening_spinner
+                        brightness: ${led_listening_brightness}
+                        red: 5%
+                        green: 90%
+                        blue: 80%
+                - condition:
+                    lambda: return id(assistant_state) == ${state_processing};
+                  sequence:
+                    - light.turn_on:
+                        id: ring_light
+                        effect: processing_pulse
+                        brightness: ${led_processing_brightness}
+                        red: 100%
+                        green: 50%
+                        blue: 0%
+                - condition:
+                    lambda: return id(assistant_state) == ${state_speaking};
+                  sequence:
+                    - light.turn_on:
+                        id: ring_light
+                        effect: speaking_wipe
+                        brightness: ${led_speaking_brightness}
+                        red: 80%
+                        green: 60%
+                        blue: 20%
+                - default:
+                    - light.turn_on:
+                        id: ring_light
+                        effect: idle_breathe
+                        brightness: ${led_idle_brightness}
+                        red: 0%
+                        green: 30%
+                        blue: 80%
+          else:
+            - light.turn_off: ring_light
+  - id: prepare_session
     mode: restart
     parameters:
-      volume: float
+      sound: string
     then:
-      - media_player.volume_set:
-          id: nabu
-          volume: !lambda return clamp(id(nabu).volume+volume, 0.0f, 1.0f);
-
-  - id: control_led_volume_touched
-    mode: restart
-    then:
+      - script.stop: follow_up_guard
+      - script.execute: stop_active_audio
+      - lambda: |-
+          id(conversation_active) = true;
+          id(error_active) = false;
+          id(conversation_had_tts) = false;
+          id(pending_follow_up) = false;
+          id(follow_up_hint) = false;
+      - micro_wake_word.stop
+      - script.execute: ensure_amp_on
+      - lambda: |-
+          id(follow_up_open) = (sound == "follow");
       - if:
           condition:
-            lambda: "return id(volume_touched);"
+            lambda: return id(led_enabled_runtime);
           then:
             - light.turn_on:
-                id: top_led
-                effect: show_volume
-            - delay: 1s
-            - lambda: |
-                id(volume_touched) = false;
-  - id: reset_led
-    then:
-      - if:
-          condition:
-            - lambda: return id(notification);
-          then:
-            - light.turn_on:
-                id: top_led
-                blue: 100%
+                id: ring_light
+                effect: wake_flash
+                brightness: ${led_listening_brightness}
                 red: 100%
-                green: 0%
-                brightness: 100%
-                effect: slow_pulse
-          else:
-            - if:
-                condition:
-                  and:
-                    - switch.is_on: use_wake_word
-                    - binary_sensor.is_off: mute_switch
-                then:
-                  - light.turn_on:
-                      id: top_led
-                      blue: 100%
-                      red: 100%
-                      green: 0%
-                      brightness: 60%
-                      effect: listening_ww
-                else:
-                  - light.turn_off: top_led
-  - id: show_volume
+                green: 60%
+                blue: 0%
+      - choose:
+          - condition:
+              lambda: return sound == "follow";
+            sequence:
+              - script.execute: play_follow_up_sound
+          - condition:
+              lambda: return sound == "start";
+            sequence:
+              - script.execute: play_start_sound
+      - delay: ${wake_word_start_delay}
+      - lambda: id(assistant_state) = ${state_listening};
+      - script.execute: update_leds
+  - id: start_session_manual
+    mode: restart
+    parameters:
+      reason: string
+      sound: string
+    then:
+      - if:
+          condition:
+            lambda: return id(mic_muted) || id(dnd_active);
+        then:
+          - script.execute: play_busy_sound
+        else:
+          - script.execute:
+              id: prepare_session
+              sound: !lambda return sound;
+          - voice_assistant.start:
+              id: va
+              pipeline: ${assist_pipeline}
+  - id: open_follow_up_session
     mode: restart
     then:
-      - light.turn_on:
-          id: top_led
-          effect: show_volume
-      - delay: 1s
-      - script.execute: reset_led
-  - id: turn_on_notification
+      - if:
+          condition:
+            lambda: return id(mic_muted) || id(dnd_active);
+        then:
+          - lambda: id(pending_follow_up) = false;
+          - script.execute: rearm_hotword
+        else:
+          - lambda: id(pending_follow_up) = false;
+          - script.execute:
+              id: prepare_session
+              sound: "follow"
+          - voice_assistant.start:
+              id: va
+              pipeline: ${assist_pipeline}
+          - script.execute: follow_up_guard
+  - id: follow_up_guard
+    mode: restart
     then:
-      - lambda: id(notification) = true;
-      - script.execute: reset_led
-
-  - id: clear_notification
+      - delay: ${follow_up_timeout}
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+                id: va
+        then:
+          - lambda: |-
+              id(follow_up_open) = false;
+              if (!id(conversation_active)) {
+                id(assistant_state) = id(mic_muted) ? ${state_muted} : ${state_idle};
+              }
+          - script.execute: update_leds
+          - script.execute: rearm_hotword
+          - script.execute: maybe_power_down_amp
+  - id: play_start_sound
+    mode: restart
     then:
-      - lambda: id(notification) = false;
-      - script.execute: reset_led
-
-  - id: turn_on_wake_word
+      - if:
+          condition:
+            switch.is_on: attention_sounds_switch
+        then:
+          - script.execute: ensure_amp_on
+          - media_player.speaker.play_on_device_media_file:
+              id: cues_player
+              media_file: start_listen
+              announcement: true
+  - id: play_follow_up_sound
+    mode: restart
+    then:
+      - if:
+          condition:
+            switch.is_on: attention_sounds_switch
+        then:
+          - script.execute: ensure_amp_on
+          - media_player.speaker.play_on_device_media_file:
+              id: cues_player
+              media_file: follow_up
+              announcement: true
+  - id: play_end_sound
+    mode: restart
+    then:
+      - if:
+          condition:
+            switch.is_on: attention_sounds_switch
+        then:
+          - script.execute: ensure_amp_on
+          - media_player.speaker.play_on_device_media_file:
+              id: cues_player
+              media_file: end_listen
+              announcement: true
+  - id: play_thinking_sound
+    mode: restart
+    then:
+      - if:
+          condition:
+            switch.is_on: attention_sounds_switch
+        then:
+          - delay: 120ms
+          - script.execute: ensure_amp_on
+          - media_player.speaker.play_on_device_media_file:
+              id: cues_player
+              media_file: thinking
+              announcement: true
+  - id: play_success_sound
+    mode: restart
+    then:
+      - if:
+          condition:
+            switch.is_on: attention_sounds_switch
+        then:
+          - script.execute: ensure_amp_on
+          - media_player.speaker.play_on_device_media_file:
+              id: cues_player
+              media_file: success
+              announcement: true
+  - id: play_error_sound
+    mode: restart
+    then:
+      - script.execute: ensure_amp_on
+      - media_player.speaker.play_on_device_media_file:
+          id: cues_player
+          media_file: error
+          announcement: true
+  - id: play_busy_sound
+    mode: restart
+    then:
+      - if:
+          condition:
+            switch.is_on: attention_sounds_switch
+        then:
+          - script.execute: ensure_amp_on
+          - media_player.speaker.play_on_device_media_file:
+              id: cues_player
+              media_file: busy
+              announcement: true
+  - id: play_sound_router
+    mode: restart
+    parameters:
+      sound: string
+    then:
+      - choose:
+          - condition:
+              lambda: return sound == "start";
+            sequence:
+              - script.execute: play_start_sound
+          - condition:
+              lambda: return sound == "follow";
+            sequence:
+              - script.execute: play_follow_up_sound
+          - condition:
+              lambda: return sound == "end";
+            sequence:
+              - script.execute: play_end_sound
+          - condition:
+              lambda: return sound == "thinking";
+            sequence:
+              - script.execute: play_thinking_sound
+          - condition:
+              lambda: return sound == "success";
+            sequence:
+              - script.execute: play_success_sound
+          - condition:
+              lambda: return sound == "error";
+            sequence:
+              - script.execute: play_error_sound
+          - condition:
+              lambda: return sound == "busy";
+            sequence:
+              - script.execute: play_busy_sound
+          - default:
+              - lambda: ESP_LOGW("feedback", "Unknown feedback sound '%s'", sound.c_str());
+  - id: stop_active_audio
+    mode: restart
+    then:
+      - script.stop: follow_up_guard
+      - speaker.stop: speaker_hw
+      - if:
+          condition:
+            voice_assistant.is_running:
+              id: va
+        then:
+          - voice_assistant.stop:
+              id: va
+          - wait_until:
+              timeout: 750ms
+              condition:
+                not:
+                  voice_assistant.is_running:
+                    id: va
+      - lambda: |-
+          id(conversation_active) = false;
+          id(conversation_had_tts) = false;
+          id(follow_up_open) = false;
+          id(pending_follow_up) = false;
+      - switch.turn_on: speaker_soft_mute
+  - id: ensure_amp_on
+    mode: queued
+    then:
+      - if:
+          condition:
+            switch.is_off: speaker_amp
+        then:
+          - switch.turn_on: speaker_amp
+          - delay: 30ms
+      - if:
+          condition:
+            switch.is_on: speaker_soft_mute
+        then:
+          - switch.turn_off: speaker_soft_mute
+  - id: maybe_power_down_amp
+    mode: restart
     then:
       - if:
           condition:
             and:
-              - binary_sensor.is_off: mute_switch
-              - switch.is_on: use_wake_word
-          then:
-            - micro_wake_word.start
-            - if:
-                condition:
-                  speaker.is_playing:
-                    id: onju_out
-                then:
-                  - speaker.stop:
-                      id: onju_out
-            - script.execute: reset_led
-          else:
-            - logger.log:
-                tag: "turn_on_wake_word"
-                format: "Trying to start listening for wake word, but %s"
-                args:
-                  [
-                    'id(mute_switch).state ? "mute switch is on" : "use wake word toggle is off"',
-                  ]
-                level: "INFO"
-
-  - id: turn_off_wake_word
+              - not:
+                  voice_assistant.is_running:
+                    id: va
+              - not:
+                  media_player.is_playing:
+                    id: pipeline_player
+              - not:
+                  media_player.is_playing:
+                    id: cues_player
+              - not:
+                  media_player.is_announcing:
+                    id: cues_player
+        then:
+          - if:
+              condition:
+                switch.is_off: speaker_soft_mute
+            then:
+              - switch.turn_on: speaker_soft_mute
+          - delay: 50ms
+          - if:
+              condition:
+                switch.is_on: speaker_amp
+            then:
+              - switch.turn_off: speaker_amp
+  - id: apply_mute_state
+    mode: queued
     then:
-      - micro_wake_word.stop
-      - script.execute: reset_led
-
-switch:
-  - platform: template
-    name: Use Wake Word
-    id: use_wake_word
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
-    on_turn_on:
-      - script.execute: turn_on_wake_word
-    on_turn_off:
-      - script.execute: turn_off_wake_word
-  - platform: gpio
-    id: dac_mute
-    # name: OnjuDacMute
-    restore_mode: ALWAYS_OFF
-    pin:
-      number: GPIO21
-      inverted: True
-
-external_components:
-  #- source: github://pr#7802 # Self calibration for ESP32 touch controls https://github.com/esphome/esphome/pull/7802
-  #  components: [esp32_touch]
-  - source:
-      type: git
-      url: https://github.com/esphome/home-assistant-voice-pe
-      ref: dev
-    components:
-      - voice_kit
-      #- nabu_microphone
-    refresh: 0s
-#  - source: # to get the mic running together with high-quality audio output (48kHz)
-#      type: git
-#      url: https://github.com/formatBCE/home-assistant-voice-pe
-#      ref: 48kHz_mic_support
-#    components:
-#      - nabu_microphone
-#    refresh: 0s
+      - lambda: |-
+          bool hardware = id(hardware_mute_switch).state;
+          bool software = id(software_muted);
+          bool final_muted = hardware || software;
+          id(mic_muted) = final_muted;
+          if (final_muted) {
+            id(follow_up_hint) = false;
+            id(pending_follow_up) = false;
+          }
+      - if:
+          condition:
+            lambda: return id(mic_muted);
+        then:
+          - script.execute: stop_active_audio
+          - microphone.mute: onju_mic
+          - lambda: id(assistant_state) = ${state_muted};
+          - script.execute: update_leds
+          - script.execute: rearm_hotword
+        else:
+          - microphone.unmute: onju_mic
+          - if:
+              condition:
+                lambda: return !id(conversation_active);
+            then:
+              - lambda: id(assistant_state) = ${state_idle};
+              - script.execute: update_leds
+          - script.execute: rearm_hotword
+      - script.execute: update_mute_led
+  - id: update_mute_led
+    then:
+      - if:
+          condition:
+            lambda: return ${mute_led_enabled};
+        then:
+          - if:
+              condition:
+                lambda: return id(mic_muted);
+            then:
+              - output.turn_on: mute_led
+            else:
+              - output.turn_off: mute_led
+  - id: rearm_hotword
+    mode: queued
+    then:
+      - lambda: |-
+          bool should_listen = !id(mic_muted) && !id(dnd_active) && !id(conversation_active) && id(wake_word_switch).state;
+          if (should_listen) {
+            if (!id(mww).is_running()) {
+              id(mww).start();
+            }
+          } else {
+            if (id(mww).is_running()) {
+              id(mww).stop();
+            }
+          }
+  - id: finalize_session
+    mode: restart
+    then:
+      - script.stop: follow_up_guard
+      - lambda: |-
+          id(conversation_active) = false;
+          const bool fallback_follow = ${listen_after_questions_default};
+          bool should_follow = (id(follow_up_hint) || fallback_follow) && id(follow_up_switch).state && id(conversation_had_tts) && !id(mic_muted) && !id(dnd_active);
+          id(pending_follow_up) = should_follow;
+          id(follow_up_hint) = false;
+      - choose:
+          - condition:
+              lambda: return id(error_active);
+            sequence:
+              - lambda: |-
+                  id(error_active) = false;
+                  id(conversation_had_tts) = false;
+                  id(follow_up_open) = false;
+                  id(pending_follow_up) = false;
+                  id(assistant_state) = id(mic_muted) ? ${state_muted} : ${state_idle};
+              - script.execute: update_leds
+              - script.execute: rearm_hotword
+              - script.execute: maybe_power_down_amp
+          - condition:
+              lambda: return id(pending_follow_up);
+            sequence:
+              - script.execute: open_follow_up_session
+          - default:
+              - if:
+                  condition:
+                    lambda: return id(conversation_had_tts) && !id(mic_muted) && !id(dnd_active);
+                then:
+                  - script.execute: play_success_sound
+              - lambda: |-
+                  id(conversation_had_tts) = false;
+                  id(follow_up_open) = false;
+                  id(pending_follow_up) = false;
+                  id(assistant_state) = id(mic_muted) ? ${state_muted} : ${state_idle};
+              - script.execute: update_leds
+              - script.execute: rearm_hotword
+              - script.execute: maybe_power_down_amp
+      - lambda: |-
+          id(conversation_had_tts) = false;
+          id(follow_up_open) = false;
+          id(pending_follow_up) = false;
+  - id: evaluate_dnd
+    mode: restart
+    then:
+      - if:
+          condition:
+            and:
+              - lambda: return ${dnd_schedule_enabled};
+              - switch.is_on: dnd_schedule_switch
+              - time.has_time: sntp_time
+        then:
+          - lambda: |-
+              auto now = id(sntp_time).now();
+              if (!now.is_valid()) {
+                return;
+              }
+              int start_minutes = ${dnd_start_hour} * 60 + ${dnd_start_minute};
+              int end_minutes = ${dnd_end_hour} * 60 + ${dnd_end_minute};
+              int current = now.hour * 60 + now.minute;
+              bool active = false;
+              if (start_minutes <= end_minutes) {
+                active = current >= start_minutes && current < end_minutes;
+              } else {
+                active = (current >= start_minutes) || (current < end_minutes);
+              }
+              id(schedule_dnd) = active;
+        else:
+          - lambda: id(schedule_dnd) = false;
+      - script.execute: update_dnd_state
+  - id: update_dnd_state
+    mode: restart
+    then:
+      - lambda: |-
+          bool new_state = id(manual_dnd) || id(schedule_dnd);
+          id(dnd_state_changed) = (new_state != id(dnd_active));
+          id(dnd_active) = new_state;
+      - if:
+          condition:
+            lambda: return id(dnd_state_changed);
+        then:
+          - if:
+              condition:
+                lambda: return id(dnd_active);
+            then:
+              - script.execute: stop_active_audio
+          - script.execute: rearm_hotword
+      - script.execute: update_leds
+      - lambda: id(dnd_state_changed) = false
+  - id: toggle_mute
+    then:
+      - if:
+          condition:
+            lambda: return id(software_muted);
+        then:
+          - switch.turn_off: software_mute_switch
+        else:
+          - switch.turn_on: software_mute_switch
